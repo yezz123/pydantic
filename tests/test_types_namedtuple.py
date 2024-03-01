@@ -1,9 +1,10 @@
 from collections import namedtuple
-from typing import NamedTuple, Tuple
+from typing import Generic, NamedTuple, Optional, Tuple, TypeVar
 
 import pytest
+from typing_extensions import NamedTuple as TypingExtensionsNamedTuple
 
-from pydantic import BaseModel, PositiveInt, ValidationError
+from pydantic import BaseModel, ConfigDict, PositiveInt, TypeAdapter, ValidationError
 from pydantic.errors import PydanticSchemaGenerationError
 
 
@@ -40,18 +41,17 @@ def test_namedtuple():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(pos=('1', 2), event=['qwe', '2', 3, 'qwe'])
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'int_parsing',
-            'loc': ('event', 'arguments', 0),
+            'loc': ('event', 0),
             'msg': 'Input should be a valid integer, unable to parse string as an integer',
             'input': 'qwe',
         }
     ]
 
 
-@pytest.mark.skip(reason='TODO JsonSchema')
 def test_namedtuple_schema():
     class Position1(NamedTuple):
         x: int
@@ -67,36 +67,29 @@ def test_namedtuple_schema():
     assert Model.model_json_schema() == {
         'title': 'Model',
         'type': 'object',
+        '$defs': {
+            'Position1': {
+                'maxItems': 2,
+                'minItems': 2,
+                'prefixItems': [{'title': 'X', 'type': 'integer'}, {'title': 'Y', 'type': 'integer'}],
+                'type': 'array',
+            },
+            'Position2': {
+                'maxItems': 2,
+                'minItems': 2,
+                'prefixItems': [{'title': 'X'}, {'title': 'Y'}],
+                'type': 'array',
+            },
+        },
         'properties': {
-            'pos1': {
-                'title': 'Pos1',
-                'type': 'array',
-                'items': [
-                    {'title': 'X', 'type': 'integer'},
-                    {'title': 'Y', 'type': 'integer'},
-                ],
-                'minItems': 2,
-                'maxItems': 2,
-            },
-            'pos2': {
-                'title': 'Pos2',
-                'type': 'array',
-                'items': [
-                    {'title': 'X'},
-                    {'title': 'Y'},
-                ],
-                'minItems': 2,
-                'maxItems': 2,
-            },
+            'pos1': {'$ref': '#/$defs/Position1'},
+            'pos2': {'$ref': '#/$defs/Position2'},
             'pos3': {
+                'maxItems': 2,
+                'minItems': 2,
+                'prefixItems': [{'type': 'integer'}, {'type': 'integer'}],
                 'title': 'Pos3',
                 'type': 'array',
-                'items': [
-                    {'type': 'integer'},
-                    {'type': 'integer'},
-                ],
-                'minItems': 2,
-                'maxItems': 2,
             },
         },
         'required': ['pos1', 'pos2', 'pos3'],
@@ -115,11 +108,11 @@ def test_namedtuple_right_length():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(p=(1, 2, 3))
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'unexpected_positional_argument',
-            'loc': ('p', 'arguments', 2),
+            'loc': ('p', 2),
             'msg': 'Unexpected positional argument',
             'input': 3,
         }
@@ -153,8 +146,7 @@ def test_namedtuple_arbitrary_type():
     class Model(BaseModel):
         x: Tup
 
-        class Config:
-            arbitrary_types_allowed = True
+        model_config = ConfigDict(arbitrary_types_allowed=True)
 
     data = {'x': Tup(c=CustomClass())}
     model = Model.model_validate(data)
@@ -164,3 +156,94 @@ def test_namedtuple_arbitrary_type():
 
         class ModelNoArbitraryTypes(BaseModel):
             x: Tup
+
+
+def test_recursive_namedtuple():
+    class MyNamedTuple(NamedTuple):
+        x: int
+        y: Optional['MyNamedTuple']
+
+    ta = TypeAdapter(MyNamedTuple)
+    assert ta.validate_python({'x': 1, 'y': {'x': 2, 'y': None}}) == (1, (2, None))
+
+    with pytest.raises(ValidationError) as exc_info:
+        ta.validate_python({'x': 1, 'y': {'x': 2, 'y': {'x': 'a', 'y': None}}})
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'input': 'a',
+            'loc': ('y', 'y', 'x'),
+            'msg': 'Input should be a valid integer, unable to parse string as an ' 'integer',
+            'type': 'int_parsing',
+        }
+    ]
+
+
+def test_recursive_generic_namedtuple():
+    # Need to use TypingExtensionsNamedTuple to make it work with Python <3.11
+    T = TypeVar('T')
+
+    class MyNamedTuple(TypingExtensionsNamedTuple, Generic[T]):
+        x: T
+        y: Optional['MyNamedTuple[T]']
+
+    ta = TypeAdapter(MyNamedTuple[int])
+    assert ta.validate_python({'x': 1, 'y': {'x': 2, 'y': None}}) == (1, (2, None))
+
+    with pytest.raises(ValidationError) as exc_info:
+        ta.validate_python({'x': 1, 'y': {'x': 2, 'y': {'x': 'a', 'y': None}}})
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'input': 'a',
+            'loc': ('y', 'y', 'x'),
+            'msg': 'Input should be a valid integer, unable to parse string as an ' 'integer',
+            'type': 'int_parsing',
+        }
+    ]
+
+
+def test_namedtuple_defaults():
+    class NT(NamedTuple):
+        x: int
+        y: int = 33
+
+    assert TypeAdapter(NT).validate_python([1]) == (1, 33)
+    assert TypeAdapter(NT).validate_python({'x': 22}) == (22, 33)
+
+
+def test_eval_type_backport():
+    class MyNamedTuple(NamedTuple):
+        foo: 'list[int | str]'
+
+    class Model(BaseModel):
+        t: MyNamedTuple
+
+    assert Model(t=([1, '2'],)).model_dump() == {'t': ([1, '2'],)}
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(t=('not a list',))
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'list_type',
+            'loc': ('t', 0),
+            'msg': 'Input should be a valid list',
+            'input': 'not a list',
+        }
+    ]
+    with pytest.raises(ValidationError) as exc_info:
+        Model(t=([{'not a str or int'}],))
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'int_type',
+            'loc': ('t', 0, 0, 'int'),
+            'msg': 'Input should be a valid integer',
+            'input': {'not a str or int'},
+        },
+        {
+            'type': 'string_type',
+            'loc': ('t', 0, 0, 'str'),
+            'msg': 'Input should be a valid string',
+            'input': {'not a str or int'},
+        },
+    ]

@@ -1,9 +1,10 @@
+import dataclasses
 import re
 import sys
-from typing import Optional, Tuple
+import typing
+from typing import Any, Optional, Tuple
 
 import pytest
-from dirty_equals import IsStr
 
 from pydantic import BaseModel, PydanticUserError, ValidationError
 
@@ -34,45 +35,44 @@ class Model(BaseModel):
     a: Model
 """
     )
-    assert module.Model.model_fields['a'].annotation.__name__ == 'SelfType'
+    assert module.Model.model_fields['a'].annotation.__name__ == 'Model'
 
 
 def test_forward_ref_auto_update_no_model(create_module):
     @create_module
     def module():
-        from pydantic import BaseModel
+        from typing import Optional
+
+        import pytest
+
+        from pydantic import BaseModel, PydanticUserError
 
         class Foo(BaseModel):
-            a: 'Bar' = None
+            a: Optional['Bar'] = None
 
-            class Config:
-                undefined_types_warning = False
+        with pytest.raises(PydanticUserError, match='`Foo` is not fully defined; you should define `Bar`,'):
+            Foo(a={'b': {'a': {}}})
 
         class Bar(BaseModel):
             b: 'Foo'
 
-    assert module.Foo.__pydantic_model_complete__ is False
-    assert module.Bar.__pydantic_model_complete__ is True
+    assert module.Bar.__pydantic_complete__ is True
     assert repr(module.Bar.model_fields['b']) == 'FieldInfo(annotation=Foo, required=True)'
 
-    # Bar should be complet and ready to use
+    # Bar should be complete and ready to use
     b = module.Bar(b={'a': {'b': {}}})
-    assert b == {'b': {'a': {'b': {'a': None}}}}
+    assert b.model_dump() == {'b': {'a': {'b': {'a': None}}}}
 
-    # __field__ is complete on Foo
-    assert repr(module.Foo.model_fields['a']).startswith(
-        'FieldInfo(annotation=SelfType, required=False, metadata=[SchemaRef(__pydantic_validation_schema__'
+    # model_fields is complete on Foo
+    assert repr(module.Foo.model_fields['a']) == (
+        'FieldInfo(annotation=Union[Bar, NoneType], required=False, default=None)'
     )
-    # but Foo is not ready to use
-    with pytest.raises(PydanticUserError, match='`Foo` is not fully defined, you should define `Bar`,'):
-        module.Foo(a={'b': {'a': {}}})
 
-    assert module.Foo.model_rebuild() is True
-    assert module.Foo.__pydantic_model_complete__ is True
-
-    # now Foo is ready to use
-    f = module.Foo(a={'b': {'a': {'b': {}}}})
-    assert f == {'a': {'b': {'a': {'b': {'a': None}}}}}
+    assert module.Foo.__pydantic_complete__ is False
+    # Foo gets auto-rebuilt during the first attempt at validation
+    f = module.Foo(a={'b': {'a': {'b': {'a': None}}}})
+    assert module.Foo.__pydantic_complete__ is True
+    assert f.model_dump() == {'a': {'b': {'a': {'b': {'a': None}}}}}
 
 
 def test_forward_ref_one_of_fields_not_defined(create_module):
@@ -82,12 +82,12 @@ def test_forward_ref_one_of_fields_not_defined(create_module):
 
         class Foo(BaseModel):
             foo: 'Foo'
-            bar: 'Bar'  # noqa: F821
+            bar: 'Bar'
 
-            class Config:
-                undefined_types_warning = False
-
-    assert hasattr(module.Foo, 'model_fields') is False
+    assert {k: repr(v) for k, v in module.Foo.model_fields.items()} == {
+        'foo': 'FieldInfo(annotation=Foo, required=True)',
+        'bar': "FieldInfo(annotation=ForwardRef('Bar'), required=True)",
+    }
 
 
 def test_basic_forward_ref(create_module):
@@ -112,7 +112,7 @@ def test_basic_forward_ref(create_module):
 def test_self_forward_ref_module(create_module):
     @create_module
     def module():
-        from typing import ForwardRef
+        from typing import ForwardRef, Optional
 
         from pydantic import BaseModel
 
@@ -120,7 +120,7 @@ def test_self_forward_ref_module(create_module):
 
         class Foo(BaseModel):
             a: int = 123
-            b: FooRef = None
+            b: Optional[FooRef] = None
 
     assert module.Foo().model_dump() == {'a': 123, 'b': None}
     assert module.Foo(b={'a': '321'}).model_dump() == {'a': 123, 'b': {'a': 321, 'b': None}}
@@ -129,7 +129,7 @@ def test_self_forward_ref_module(create_module):
 def test_self_forward_ref_collection(create_module):
     @create_module
     def module():
-        from typing import Dict, List  # noqa: F401
+        from typing import Dict, List
 
         from pydantic import BaseModel
 
@@ -149,21 +149,23 @@ def test_self_forward_ref_collection(create_module):
 
     with pytest.raises(ValidationError) as exc_info:
         module.Foo(b={'a': '321'}, c=[{'b': 234}], d={'bar': {'a': 345}})
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
-        {'type': 'dict_type', 'loc': ('c', 0, 'b'), 'msg': 'Input should be a valid dictionary', 'input': 234}
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'model_type',
+            'loc': ('c', 0, 'b'),
+            'msg': 'Input should be a valid dictionary or instance of Foo',
+            'input': 234,
+            'ctx': {'class_name': 'Foo'},
+        }
     ]
 
     assert repr(module.Foo.model_fields['a']) == 'FieldInfo(annotation=int, required=False, default=123)'
-    assert repr(module.Foo.model_fields['b']) == IsStr(
-        regex=r'FieldInfo\(annotation=SelfType, required=False, metadata=\[Schem.+.Foo\'\}\}\)\]\)'
-    )
+    assert repr(module.Foo.model_fields['b']) == 'FieldInfo(annotation=Foo, required=False, default=None)'
     if sys.version_info < (3, 10):
         return
-    assert repr(module.Foo.model_fields['c']) == IsStr(regex=r'FieldInfo\(annotation=List\[Annotated\[SelfType.+')
-    assert repr(module.Foo.model_fields['d']) == IsStr(
-        regex=r'FieldInfo\(annotation=Dict\[str, Annotated\[SelfType, SchemaRef.*'
-    )
+    assert repr(module.Foo.model_fields['c']) == ('FieldInfo(annotation=List[Foo], required=False, ' 'default=[])')
+    assert repr(module.Foo.model_fields['d']) == ('FieldInfo(annotation=Dict[str, Foo], required=False, default={})')
 
 
 def test_self_forward_ref_local(create_module):
@@ -187,37 +189,20 @@ def test_self_forward_ref_local(create_module):
     assert Foo(b={'a': '321'}).model_dump() == {'a': 123, 'b': {'a': 321, 'b': None}}
 
 
-@pytest.mark.xfail(reason='TODO dataclasses')
 def test_forward_ref_dataclass(create_module):
     @create_module
     def module():
-        from pydantic import AnyUrl
+        from typing import Optional
+
         from pydantic.dataclasses import dataclass
 
         @dataclass
-        class Dataclass:
-            url: AnyUrl
+        class MyDataclass:
+            a: int
+            b: Optional['MyDataclass'] = None
 
-    m = module.Dataclass('http://example.com  ')
-    assert m.url == 'http://example.com'
-
-
-@pytest.mark.xfail(reason='TODO dataclasses')
-def test_forward_ref_dataclass_with_future_annotations(create_module):
-    module = create_module(
-        # language=Python
-        """
-from __future__ import annotations
-from pydantic import AnyUrl
-from pydantic.dataclasses import dataclass
-
-@dataclass
-class Dataclass:
-    url: AnyUrl
-    """
-    )
-    m = module.Dataclass('http://example.com  ')
-    assert m.url == 'http://example.com'
+    dc = module.MyDataclass(a=1, b={'a': 2, 'b': {'a': 3}})
+    assert dataclasses.asdict(dc) == {'a': 1, 'b': {'a': 2, 'b': {'a': 3, 'b': None}}}
 
 
 def test_forward_ref_sub_types(create_module):
@@ -276,7 +261,6 @@ def test_forward_ref_nested_sub_types(create_module):
     assert isinstance(node.right[0], Node)
 
 
-@pytest.mark.xfail(reason='TODO schema')
 def test_self_reference_json_schema(create_module):
     @create_module
     def module():
@@ -290,8 +274,8 @@ def test_self_reference_json_schema(create_module):
 
     Account = module.Account
     assert Account.model_json_schema() == {
-        '$ref': '#/definitions/Account',
-        'definitions': {
+        'allOf': [{'$ref': '#/$defs/Account'}],
+        '$defs': {
             'Account': {
                 'title': 'Account',
                 'type': 'object',
@@ -301,7 +285,7 @@ def test_self_reference_json_schema(create_module):
                         'title': 'Subaccounts',
                         'default': [],
                         'type': 'array',
-                        'items': {'$ref': '#/definitions/Account'},
+                        'items': {'$ref': '#/$defs/Account'},
                     },
                 },
                 'required': ['name'],
@@ -310,24 +294,22 @@ def test_self_reference_json_schema(create_module):
     }
 
 
-@pytest.mark.xfail(reason='TODO schema')
 def test_self_reference_json_schema_with_future_annotations(create_module):
     module = create_module(
         # language=Python
         """
 from __future__ import annotations
-from typing import List
 from pydantic import BaseModel
 
 class Account(BaseModel):
   name: str
-  subaccounts: List[Account] = []
+  subaccounts: list[Account] = []
     """
     )
     Account = module.Account
     assert Account.model_json_schema() == {
-        '$ref': '#/definitions/Account',
-        'definitions': {
+        'allOf': [{'$ref': '#/$defs/Account'}],
+        '$defs': {
             'Account': {
                 'title': 'Account',
                 'type': 'object',
@@ -337,7 +319,7 @@ class Account(BaseModel):
                         'title': 'Subaccounts',
                         'default': [],
                         'type': 'array',
-                        'items': {'$ref': '#/definitions/Account'},
+                        'items': {'$ref': '#/$defs/Account'},
                     },
                 },
                 'required': ['name'],
@@ -346,7 +328,6 @@ class Account(BaseModel):
     }
 
 
-@pytest.mark.xfail(reason='TODO schema')
 def test_circular_reference_json_schema(create_module):
     @create_module
     def module():
@@ -364,19 +345,19 @@ def test_circular_reference_json_schema(create_module):
 
     Account = module.Account
     assert Account.model_json_schema() == {
-        '$ref': '#/definitions/Account',
-        'definitions': {
+        'allOf': [{'$ref': '#/$defs/Account'}],
+        '$defs': {
             'Account': {
                 'title': 'Account',
                 'type': 'object',
                 'properties': {
                     'name': {'title': 'Name', 'type': 'string'},
-                    'owner': {'$ref': '#/definitions/Owner'},
+                    'owner': {'$ref': '#/$defs/Owner'},
                     'subaccounts': {
                         'title': 'Subaccounts',
                         'default': [],
                         'type': 'array',
-                        'items': {'$ref': '#/definitions/Account'},
+                        'items': {'$ref': '#/$defs/Account'},
                     },
                 },
                 'required': ['name', 'owner'],
@@ -384,20 +365,18 @@ def test_circular_reference_json_schema(create_module):
             'Owner': {
                 'title': 'Owner',
                 'type': 'object',
-                'properties': {'account': {'$ref': '#/definitions/Account'}},
+                'properties': {'account': {'$ref': '#/$defs/Account'}},
                 'required': ['account'],
             },
         },
     }
 
 
-@pytest.mark.xfail(reason='TODO schema')
 def test_circular_reference_json_schema_with_future_annotations(create_module):
     module = create_module(
         # language=Python
         """
 from __future__ import annotations
-from typing import List
 from pydantic import BaseModel
 
 class Owner(BaseModel):
@@ -406,25 +385,25 @@ class Owner(BaseModel):
 class Account(BaseModel):
   name: str
   owner: Owner
-  subaccounts: List[Account] = []
+  subaccounts: list[Account] = []
 
     """
     )
     Account = module.Account
     assert Account.model_json_schema() == {
-        '$ref': '#/definitions/Account',
-        'definitions': {
+        'allOf': [{'$ref': '#/$defs/Account'}],
+        '$defs': {
             'Account': {
                 'title': 'Account',
                 'type': 'object',
                 'properties': {
                     'name': {'title': 'Name', 'type': 'string'},
-                    'owner': {'$ref': '#/definitions/Owner'},
+                    'owner': {'$ref': '#/$defs/Owner'},
                     'subaccounts': {
                         'title': 'Subaccounts',
                         'default': [],
                         'type': 'array',
-                        'items': {'$ref': '#/definitions/Account'},
+                        'items': {'$ref': '#/$defs/Account'},
                     },
                 },
                 'required': ['name', 'owner'],
@@ -432,7 +411,7 @@ class Account(BaseModel):
             'Owner': {
                 'title': 'Owner',
                 'type': 'object',
-                'properties': {'account': {'$ref': '#/definitions/Account'}},
+                'properties': {'account': {'$ref': '#/$defs/Account'}},
                 'required': ['account'],
             },
         },
@@ -445,13 +424,12 @@ def test_forward_ref_with_field(create_module):
         from typing import ForwardRef, List
 
         import pytest
-        from pydantic_core import SchemaError
 
         from pydantic import BaseModel, Field
 
         Foo = ForwardRef('Foo')
 
-        with pytest.raises(SchemaError, match=r'Extra inputs are not permitted \[type=extra_forbidden,'):
+        with pytest.raises(TypeError, match=r'The following constraints cannot be applied.*\'gt\''):
 
             class Foo(BaseModel):
                 c: List[Foo] = Field(..., gt=0)
@@ -463,50 +441,44 @@ def test_forward_ref_optional(create_module):
         """
 from __future__ import annotations
 from pydantic import BaseModel, Field
-from typing import List, Optional
 
 
 class Spec(BaseModel):
-    spec_fields: List[str] = Field(..., alias="fields")
-    filter: Optional[str] = None
-    sort: Optional[str]
+    spec_fields: list[str] = Field(..., alias="fields")
+    filter: str | None = None
+    sort: str | None
 
 
 class PSpec(Spec):
-    g: Optional[GSpec]
-
-    class Config:
-        undefined_types_warning = False
+    g: GSpec | None = None
 
 
 class GSpec(Spec):
-    p: Optional[PSpec]
+    p: PSpec | None
 
 # PSpec.model_rebuild()
 
 class Filter(BaseModel):
-    g: Optional[GSpec] = None
-    p: Optional[PSpec]
+    g: GSpec | None = None
+    p: PSpec | None
     """
     )
     Filter = module.Filter
     assert isinstance(Filter(p={'sort': 'some_field:asc', 'fields': []}), Filter)
 
 
-@pytest.mark.xfail(reason='TODO create_model')
 def test_forward_ref_with_create_model(create_module):
     @create_module
     def module():
         import pydantic
 
-        Sub = pydantic.create_model('Sub', foo='bar', __module__=__name__)
+        Sub = pydantic.create_model('Sub', foo=(str, 'bar'), __module__=__name__)
         assert Sub  # get rid of "local variable 'Sub' is assigned to but never used"
         Main = pydantic.create_model('Main', sub=('Sub', ...), __module__=__name__)
         instance = Main(sub={})
         assert instance.sub.model_dump() == {'foo': 'bar'}
 
 
-@pytest.mark.xfail(reason='TODO dataclasses')
 def test_resolve_forward_ref_dataclass(create_module):
     module = create_module(
         # language=Python
@@ -533,13 +505,12 @@ class What(BaseModel):
 
 def test_nested_forward_ref():
     class NestedTuple(BaseModel):
-        x: Tuple[int, Optional['NestedTuple']]  # noqa: F821
+        x: Tuple[int, Optional['NestedTuple']]
 
     obj = NestedTuple.model_validate({'x': ('1', {'x': ('2', {'x': ('3', None)})})})
     assert obj.model_dump() == {'x': (1, {'x': (2, {'x': (3, None)})})}
 
 
-@pytest.mark.xfail(reason='TODO discriminator')
 def test_discriminated_union_forward_ref(create_module):
     @create_module
     def module():
@@ -550,7 +521,7 @@ def test_discriminated_union_forward_ref(create_module):
         from pydantic import BaseModel, Field
 
         class Pet(BaseModel):
-            __root__: Union['Cat', 'Dog'] = Field(..., discriminator='type')  # noqa: F821
+            pet: Union['Cat', 'Dog'] = Field(discriminator='type')
 
         class Cat(BaseModel):
             type: Literal['cat']
@@ -558,36 +529,45 @@ def test_discriminated_union_forward_ref(create_module):
         class Dog(BaseModel):
             type: Literal['dog']
 
-    with pytest.raises(PydanticUserError, match='`Pet` is not fully defined, you should define `Cat`'):
-        module.Pet.model_validate({'type': 'pika'})
+    assert module.Pet.__pydantic_complete__ is False
 
-    module.Pet.model_rebuild()
+    with pytest.raises(
+        ValidationError,
+        match="Input tag 'pika' found using 'type' does not match any of the expected tags: 'cat', 'dog'",
+    ):
+        module.Pet.model_validate({'pet': {'type': 'pika'}})
 
-    with pytest.raises(ValidationError, match="No match for discriminator 'type' and value 'pika'"):
-        module.Pet.model_validate({'type': 'pika'})
+    # Ensure the rebuild has happened automatically despite validation failure
+    assert module.Pet.__pydantic_complete__ is True
 
     assert module.Pet.model_json_schema() == {
         'title': 'Pet',
-        'discriminator': {'propertyName': 'type', 'mapping': {'cat': '#/definitions/Cat', 'dog': '#/definitions/Dog'}},
-        'oneOf': [{'$ref': '#/definitions/Cat'}, {'$ref': '#/definitions/Dog'}],
-        'definitions': {
+        'required': ['pet'],
+        'type': 'object',
+        'properties': {
+            'pet': {
+                'title': 'Pet',
+                'discriminator': {'mapping': {'cat': '#/$defs/Cat', 'dog': '#/$defs/Dog'}, 'propertyName': 'type'},
+                'oneOf': [{'$ref': '#/$defs/Cat'}, {'$ref': '#/$defs/Dog'}],
+            }
+        },
+        '$defs': {
             'Cat': {
                 'title': 'Cat',
                 'type': 'object',
-                'properties': {'type': {'title': 'Type', 'enum': ['cat'], 'type': 'string'}},
+                'properties': {'type': {'const': 'cat', 'title': 'Type'}},
                 'required': ['type'],
             },
             'Dog': {
                 'title': 'Dog',
                 'type': 'object',
-                'properties': {'type': {'title': 'Type', 'enum': ['dog'], 'type': 'string'}},
+                'properties': {'type': {'const': 'dog', 'title': 'Type'}},
                 'required': ['type'],
             },
         },
     }
 
 
-@pytest.mark.xfail(reason='TODO class_vars')
 def test_class_var_as_string(create_module):
     module = create_module(
         # language=Python
@@ -604,12 +584,11 @@ class Model(BaseModel):
     assert module.Model.__class_vars__ == {'a'}
 
 
-@pytest.mark.xfail(reason='TODO json encoding')
 def test_json_encoder_str(create_module):
     module = create_module(
         # language=Python
         """
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, field_serializer
 
 
 class User(BaseModel):
@@ -627,38 +606,16 @@ class Model(BaseModel):
     foo_user: FooUser
     user: User
 
-    class Config:
-        json_encoders = {
-            'User': lambda v: f'User({v.y})',
-        }
+    @field_serializer('user')
+    def serialize_user(self, v):
+        return f'User({v.y})'
+
 """
     )
 
     m = module.Model(foo_user={'x': 'user1'}, user={'y': 'user2'})
-    assert m.model_dump_json(models_as_dict=False) == '{"foo_user": {"x": "user1"}, "user": "User(user2)"}'
-
-
-@pytest.mark.xfail(reason='TODO json encoding')
-def test_json_encoder_forward_ref(create_module):
-    module = create_module(
-        # language=Python
-        """
-from pydantic import BaseModel
-from typing import ForwardRef, List, Optional
-
-class User(BaseModel):
-    name: str
-    friends: Optional[List['User']] = None
-
-    class Config:
-        json_encoders = {
-            ForwardRef('User'): lambda v: f'User({v.name})',
-        }
-"""
-    )
-
-    m = module.User(name='anne', friends=[{'name': 'ben'}, {'name': 'charlie'}])
-    assert m.model_json(models_as_dict=False) == '{"name": "anne", "friends": ["User(ben)", "User(charlie)"]}'
+    # TODO: How can we replicate this custom-encoder functionality without affecting the serialization of `User`?
+    assert m.model_dump_json() == '{"foo_user":{"x":"user1"},"user":"User(user2)"}'
 
 
 skip_pep585 = pytest.mark.skipif(
@@ -681,9 +638,10 @@ class SelfReferencing(BaseModel):
 
     SelfReferencing = module.SelfReferencing
     if sys.version_info >= (3, 10):
-        assert repr(SelfReferencing.model_fields['names']) == IsStr(
-            regex=r'FieldInfo\(annotation=list\[Annotated\[SelfType, SchemaRef.+, required=True\)'
+        assert (
+            repr(SelfReferencing.model_fields['names']) == 'FieldInfo(annotation=list[SelfReferencing], required=True)'
         )
+
     # test that object creation works
     obj = SelfReferencing(names=[SelfReferencing(names=[])])
     assert obj.names == [SelfReferencing(names=[])]
@@ -701,10 +659,7 @@ def test_pep585_recursive_generics(create_module):
 
         class Team(BaseModel):
             name: str
-            heroes: list[HeroRef]  # noqa: F821
-
-            class Config:
-                undefined_types_warning = False
+            heroes: list[HeroRef]
 
         class Hero(BaseModel):
             name: str
@@ -720,7 +675,6 @@ def test_pep585_recursive_generics(create_module):
     assert h.model_dump() == {'name': 'Ivan', 'teams': [{'name': 'TheBest', 'heroes': []}]}
 
 
-@pytest.mark.skipif(sys.version_info < (3, 9), reason='needs 3.9 or newer')
 def test_class_var_forward_ref(create_module):
     # see #3679
     create_module(
@@ -751,17 +705,93 @@ class Foobar(BaseModel):
     )
     f = module.Foobar(x=1, y={'x': 2})
     assert f.model_dump() == {'x': 1, 'y': {'x': 2, 'y': None}}
-    assert f.__fields_set__ == {'x', 'y'}
-    assert f.y.__fields_set__ == {'x'}
+    assert f.model_fields_set == {'x', 'y'}
+    assert f.y.model_fields_set == {'x'}
+
+
+@pytest.mark.skipif(sys.version_info < (3, 10), reason='needs 3.10 or newer')
+def test_recursive_models_union(create_module):
+    # This test should pass because PydanticRecursiveRef.__or__ is implemented,
+    # not because `eval_type_backport` magically makes `|` work,
+    # since it's installed for tests but otherwise optional.
+    sys.modules['eval_type_backport'] = None  # type: ignore
+    try:
+        module = create_module(
+            # language=Python
+            """
+from __future__ import annotations
+
+from pydantic import BaseModel
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+
+class Foo(BaseModel):
+    bar: Bar[str] | None = None
+    bar2: int | Bar[float]
+
+class Bar(BaseModel, Generic[T]):
+    foo: Foo
+    """
+        )
+    finally:
+        del sys.modules['eval_type_backport']
+
+    assert module.Foo.model_fields['bar'].annotation == typing.Optional[module.Bar[str]]
+    assert module.Foo.model_fields['bar2'].annotation == typing.Union[int, module.Bar[float]]
+    assert module.Bar.model_fields['foo'].annotation == module.Foo
+
+
+def test_recursive_models_union_backport(create_module):
+    module = create_module(
+        # language=Python
+        """
+from __future__ import annotations
+
+from pydantic import BaseModel
+from typing import TypeVar, Generic
+
+T = TypeVar("T")
+
+class Foo(BaseModel):
+    bar: Bar[str] | None = None
+    # The `int | str` here differs from the previous test and requires the backport.
+    # At the same time, `PydanticRecursiveRef.__or__` means that the second `|` works normally,
+    # which actually triggered a bug in the backport that needed fixing.
+    bar2: int | str | Bar[float]
+
+class Bar(BaseModel, Generic[T]):
+    foo: Foo
+"""
+    )
+
+    assert module.Foo.model_fields['bar'].annotation == typing.Optional[module.Bar[str]]
+    assert module.Foo.model_fields['bar2'].annotation == typing.Union[int, str, module.Bar[float]]
+    assert module.Bar.model_fields['foo'].annotation == module.Foo
 
 
 def test_force_rebuild():
     class Foobar(BaseModel):
         b: int
 
-    assert Foobar.__pydantic_model_complete__ is True
+    assert Foobar.__pydantic_complete__ is True
     assert Foobar.model_rebuild() is None
     assert Foobar.model_rebuild(force=True) is True
+
+
+def test_rebuild_subclass_of_built_model():
+    class Model(BaseModel):
+        x: int
+
+    class FutureReferencingModel(Model):
+        y: 'FutureModel'
+
+    class FutureModel(BaseModel):
+        pass
+
+    FutureReferencingModel.model_rebuild()
+
+    assert FutureReferencingModel(x=1, y=FutureModel()).model_dump() == {'x': 1, 'y': {}}
 
 
 def test_nested_annotation(create_module):
@@ -783,7 +813,7 @@ def nested():
     )
 
     bar_model = module.nested()
-    assert bar_model.__pydantic_model_complete__ is True
+    assert bar_model.__pydantic_complete__ is True
     assert bar_model(b={'a': 1}).model_dump() == {'b': {'a': 1}}
 
 
@@ -800,16 +830,13 @@ def test_nested_more_annotation(create_module):
                 class Bar(BaseModel):
                     b: 'Foo'
 
-                    class Config:
-                        undefined_types_warning = False
-
                 return Bar
 
             return more_nested()
 
     bar_model = module.nested()
     # this does not work because Foo is in a parent scope
-    assert bar_model.__pydantic_model_complete__ is False
+    assert bar_model.__pydantic_complete__ is False
 
 
 def test_nested_annotation_priority(create_module):
@@ -823,7 +850,7 @@ def test_nested_annotation_priority(create_module):
         Foobar = Annotated[int, Gt(0)]  # noqa: F841
 
         def nested():
-            Foobar = Annotated[int, Gt(10)]  # noqa: F841
+            Foobar = Annotated[int, Gt(10)]
 
             class Bar(BaseModel):
                 b: 'Foobar'
@@ -846,39 +873,37 @@ def test_nested_model_rebuild(create_module):
             class Bar(BaseModel):
                 b: 'Foo'
 
-                class Config:
-                    undefined_types_warning = False
-
             class Foo(BaseModel):
                 a: int
 
-            assert Bar.__pydantic_model_complete__ is False
+            assert Bar.__pydantic_complete__ is False
             Bar.model_rebuild()
             return Bar
 
     bar_model = module.nested()
-    assert bar_model.__pydantic_model_complete__ is True
+    assert bar_model.__pydantic_complete__ is True
     assert bar_model(b={'a': 1}).model_dump() == {'b': {'a': 1}}
 
 
-def pytest_raises_undefined_types_warning(defining_class_name, missing_type_name):
-    """Returns a pytest.raises context manager that checks for the correct undefined types warning message.
-    usage: `with pytest_raises_undefined_types_warning(class_name='Foobar', missing_class_name='UndefinedType'):`
+def pytest_raises_user_error_for_undefined_type(defining_class_name, missing_type_name):
+    """
+    Returns a `pytest.raises` context manager that checks the error message when an undefined type is present.
+
+    usage: `with pytest_raises_user_error_for_undefined_type(class_name='Foobar', missing_class_name='UndefinedType'):`
     """
 
     return pytest.raises(
-        UserWarning,
+        PydanticUserError,
         match=re.escape(
-            # split this f-string into two lines to pass linting (line too long)
-            f'`{defining_class_name}` is not fully defined, you should define `{missing_type_name}`, '
-            f'then call `{defining_class_name}.model_rebuild()`',
+            f'`{defining_class_name}` is not fully defined; you should define `{missing_type_name}`, then call'
+            f' `{defining_class_name}.model_rebuild()`.'
         ),
     )
 
 
 #   NOTE: the `undefined_types_warning` tests below are "statically parameterized" (i.e. have Duplicate Code).
-#   The initial attempt to refactor them into a single parameterized test was not strateforward, due to the use of the
-#   `create_module` fixture and the need for `from __future__ import annotations` be the first line in a module.
+#   The initial attempt to refactor them into a single parameterized test was not straightforward due to the use of the
+#   `create_module` fixture and the requirement that `from __future__ import annotations` be the first line in a module.
 #
 #   Test Parameters:
 #     1. config setting: (1a) default behavior vs (1b) overriding with Config setting:
@@ -889,7 +914,7 @@ def pytest_raises_undefined_types_warning(defining_class_name, missing_type_name
 
 
 def test_undefined_types_warning_1a_raised_by_default_2a_future_annotations(create_module):
-    with pytest_raises_undefined_types_warning(defining_class_name='Foobar', missing_type_name='UndefinedType'):
+    with pytest_raises_user_error_for_undefined_type(defining_class_name='Foobar', missing_type_name='UndefinedType'):
         create_module(
             # language=Python
             """
@@ -898,12 +923,15 @@ from pydantic import BaseModel
 
 class Foobar(BaseModel):
     a: UndefinedType
+
+# Trigger the error for an undefined type:
+Foobar(a=1)
 """
         )
 
 
 def test_undefined_types_warning_1a_raised_by_default_2b_forward_ref(create_module):
-    with pytest_raises_undefined_types_warning(defining_class_name='Foobar', missing_type_name='UndefinedType'):
+    with pytest_raises_user_error_for_undefined_type(defining_class_name='Foobar', missing_type_name='UndefinedType'):
 
         @create_module
         def module():
@@ -916,6 +944,9 @@ def test_undefined_types_warning_1a_raised_by_default_2b_forward_ref(create_modu
             class Foobar(BaseModel):
                 a: UndefinedType
 
+            # Trigger the error for an undefined type
+            Foobar(a=1)
+
 
 def test_undefined_types_warning_1b_suppressed_via_config_2a_future_annotations(create_module):
     module = create_module(
@@ -924,16 +955,14 @@ def test_undefined_types_warning_1b_suppressed_via_config_2a_future_annotations(
 from __future__ import annotations
 from pydantic import BaseModel
 
+# Because we don't instantiate the type, no error for an undefined type is raised
 class Foobar(BaseModel):
     a: UndefinedType
-    # Suppress the undefined_types_warning
-    class Config:
-        undefined_types_warning = False
 """
     )
-    # Since we're testing the absence of a warning, it's important to confirm pydantic was actually run.
-    # The presence of the `__pydantic_model_complete__` is a good indicator of this.
-    assert module.Foobar.__pydantic_model_complete__ is False
+    # Since we're testing the absence of an error, it's important to confirm pydantic was actually run.
+    # The presence of the `__pydantic_complete__` is a good indicator of this.
+    assert module.Foobar.__pydantic_complete__ is False
 
 
 def test_undefined_types_warning_1b_suppressed_via_config_2b_forward_ref(create_module):
@@ -945,13 +974,107 @@ def test_undefined_types_warning_1b_suppressed_via_config_2b_forward_ref(create_
 
         UndefinedType = ForwardRef('UndefinedType')
 
+        # Because we don't instantiate the type, no error for an undefined type is raised
         class Foobar(BaseModel):
             a: UndefinedType
 
-            # Suppress the undefined_types_warning
-            class Config:
-                undefined_types_warning = False
-
     # Since we're testing the absence of a warning, it's important to confirm pydantic was actually run.
-    # The presence of the `__pydantic_model_complete__` is a good indicator of this.
-    assert module.Foobar.__pydantic_model_complete__ is False
+    # The presence of the `__pydantic_complete__` is a good indicator of this.
+    assert module.Foobar.__pydantic_complete__ is False
+
+
+def test_undefined_types_warning_raised_by_usage(create_module):
+    with pytest_raises_user_error_for_undefined_type('Foobar', 'UndefinedType'):
+
+        @create_module
+        def module():
+            from typing import ForwardRef
+
+            from pydantic import BaseModel
+
+            UndefinedType = ForwardRef('UndefinedType')
+
+            class Foobar(BaseModel):
+                a: UndefinedType
+
+            Foobar(a=1)
+
+
+def test_rebuild_recursive_schema():
+    from typing import ForwardRef, List
+
+    class Expressions_(BaseModel):
+        model_config = dict(undefined_types_warning=False)
+        items: List["types['Expression']"]
+
+    class Expression_(BaseModel):
+        model_config = dict(undefined_types_warning=False)
+        Or: ForwardRef("types['allOfExpressions']")
+        Not: ForwardRef("types['allOfExpression']")
+
+    class allOfExpression_(BaseModel):
+        model_config = dict(undefined_types_warning=False)
+        Not: ForwardRef("types['Expression']")
+
+    class allOfExpressions_(BaseModel):
+        model_config = dict(undefined_types_warning=False)
+        items: List["types['Expression']"]
+
+    types_namespace = {
+        'types': {
+            'Expression': Expression_,
+            'Expressions': Expressions_,
+            'allOfExpression': allOfExpression_,
+            'allOfExpressions': allOfExpressions_,
+        }
+    }
+
+    models = [allOfExpressions_, Expressions_]
+    for m in models:
+        m.model_rebuild(_types_namespace=types_namespace)
+
+
+def test_forward_ref_in_generic(create_module: Any) -> None:
+    """https://github.com/pydantic/pydantic/issues/6503"""
+
+    @create_module
+    def module():
+        import typing as tp
+
+        from pydantic import BaseModel
+
+        class Foo(BaseModel):
+            x: tp.Dict['tp.Type[Bar]', tp.Type['Bar']]
+
+        class Bar(BaseModel):
+            pass
+
+    Foo = module.Foo
+    Bar = module.Bar
+
+    assert Foo(x={Bar: Bar}).x[Bar] is Bar
+
+
+def test_forward_ref_in_generic_separate_modules(create_module: Any) -> None:
+    """https://github.com/pydantic/pydantic/issues/6503"""
+
+    @create_module
+    def module_1():
+        import typing as tp
+
+        from pydantic import BaseModel
+
+        class Foo(BaseModel):
+            x: tp.Dict['tp.Type[Bar]', tp.Type['Bar']]
+
+    @create_module
+    def module_2():
+        from pydantic import BaseModel
+
+        class Bar(BaseModel):
+            pass
+
+    Foo = module_1.Foo
+    Bar = module_2.Bar
+    Foo.model_rebuild(_types_namespace={'tp': typing, 'Bar': Bar})
+    assert Foo(x={Bar: Bar}).x[Bar] is Bar

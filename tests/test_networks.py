@@ -1,3 +1,6 @@
+import json
+from typing import Union
+
 import pytest
 from pydantic_core import PydanticCustomError, Url
 from typing_extensions import Annotated
@@ -10,8 +13,11 @@ from pydantic import (
     FileUrl,
     HttpUrl,
     KafkaDsn,
+    MariaDBDsn,
     MongoDsn,
+    MySQLDsn,
     NameEmail,
+    NatsDsn,
     PostgresDsn,
     RedisDsn,
     Strict,
@@ -42,6 +48,17 @@ except ImportError:
         'postgresql+psycopg2cffi://user:pass@localhost:5432/app',
         'postgresql+py-postgresql://user:pass@localhost:5432/app',
         'postgresql+pygresql://user:pass@localhost:5432/app',
+        'mysql://user:pass@localhost:3306/app',
+        'mysql+mysqlconnector://user:pass@localhost:3306/app',
+        'mysql+aiomysql://user:pass@localhost:3306/app',
+        'mysql+asyncmy://user:pass@localhost:3306/app',
+        'mysql+mysqldb://user:pass@localhost:3306/app',
+        'mysql+pymysql://user:pass@localhost:3306/app?charset=utf8mb4',
+        'mysql+cymysql://user:pass@localhost:3306/app',
+        'mysql+pyodbc://user:pass@localhost:3306/app',
+        'mariadb://user:pass@localhost:3306/app',
+        'mariadb+mariadbconnector://user:pass@localhost:3306/app',
+        'mariadb+pymysql://user:pass@localhost:3306/app',
         'foo-bar://example.org',
         'foo.bar://example.org',
         'foo0bar://example.org',
@@ -112,7 +129,7 @@ def test_any_url_success(value):
         ('+http://example.com/', 'url_parsing', 'Input should be a valid URL, relative URL without a base'),
         ('ht*tp://example.com/', 'url_parsing', 'Input should be a valid URL, relative URL without a base'),
         (' ', 'url_parsing', 'Input should be a valid URL, relative URL without a base'),
-        ('', 'url_parsing', 'Input should be a valid URL, relative URL without a base'),
+        ('', 'url_parsing', 'Input should be a valid URL, input is empty'),
         (None, 'url_type', 'URL input should be a string or URL'),
         (
             'http://2001:db8::ff00:42:8329',
@@ -129,8 +146,8 @@ def test_any_url_invalid(value, err_type, err_msg):
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=value)
-    assert len(exc_info.value.errors()) == 1, exc_info.value.errors()
-    error = exc_info.value.errors()[0]
+    assert len(exc_info.value.errors(include_url=False)) == 1, exc_info.value.errors(include_url=False)
+    error = exc_info.value.errors(include_url=False)[0]
     # debug(error)
     assert {'type': error['type'], 'msg': error['msg']} == {'type': err_type, 'msg': err_msg}
 
@@ -260,6 +277,14 @@ def test_http_url_success(value, expected):
     assert str(Model(v=value).v) == expected
 
 
+def test_nullable_http_url():
+    class Model(BaseModel):
+        v: Union[HttpUrl, None]
+
+    assert Model(v=None).v is None
+    assert str(Model(v='http://example.org').v) == 'http://example.org/'
+
+
 @pytest.mark.parametrize(
     'value,err_type,err_msg',
     [
@@ -281,8 +306,8 @@ def test_http_url_invalid(value, err_type, err_msg):
 
     with pytest.raises(ValidationError) as exc_info:
         Model(v=value)
-    assert len(exc_info.value.errors()) == 1, exc_info.value.errors()
-    error = exc_info.value.errors()[0]
+    assert len(exc_info.value.errors(include_url=False)) == 1, exc_info.value.errors(include_url=False)
+    error = exc_info.value.errors(include_url=False)[0]
     assert {'type': error['type'], 'msg': error['msg']} == {'type': err_type, 'msg': err_msg}
 
 
@@ -349,11 +374,47 @@ def test_http_urls_default_port(url, expected_port, expected_str):
         'postgresql://user:pass@localhost:5432/app',
         'postgresql+asyncpg://user:pass@localhost:5432/app',
         'postgres://user:pass@host1.db.net,host2.db.net:6432/app',
+        'postgres://user:pass@%2Fvar%2Flib%2Fpostgresql/dbname',
     ],
 )
 def test_postgres_dsns(dsn):
     class Model(BaseModel):
         a: PostgresDsn
+
+    assert str(Model(a=dsn).a) == dsn
+
+
+@pytest.mark.parametrize(
+    'dsn',
+    [
+        'mysql://user:pass@localhost:3306/app',
+        'mysql+mysqlconnector://user:pass@localhost:3306/app',
+        'mysql+aiomysql://user:pass@localhost:3306/app',
+        'mysql+asyncmy://user:pass@localhost:3306/app',
+        'mysql+mysqldb://user:pass@localhost:3306/app',
+        'mysql+pymysql://user:pass@localhost:3306/app?charset=utf8mb4',
+        'mysql+cymysql://user:pass@localhost:3306/app',
+        'mysql+pyodbc://user:pass@localhost:3306/app',
+    ],
+)
+def test_mysql_dsns(dsn):
+    class Model(BaseModel):
+        a: MySQLDsn
+
+    assert str(Model(a=dsn).a) == dsn
+
+
+@pytest.mark.parametrize(
+    'dsn',
+    [
+        'mariadb://user:pass@localhost:3306/app',
+        'mariadb+mariadbconnector://user:pass@localhost:3306/app',
+        'mariadb+pymysql://user:pass@localhost:3306/app',
+    ],
+)
+def test_mariadb_dsns(dsn):
+    class Model(BaseModel):
+        a: MariaDBDsn
 
     assert str(Model(a=dsn).a) == dsn
 
@@ -418,7 +479,7 @@ def test_postgres_dsns_validation_error(dsn, error_message):
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a=dsn)
-    error = exc_info.value.errors()[0]
+    error = exc_info.value.errors(include_url=False)[0]
     error.pop('ctx', None)
     assert error == error_message
 
@@ -461,7 +522,7 @@ def test_cockroach_dsns():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='http://example.org')
-    assert exc_info.value.errors()[0]['type'] == 'url_scheme'
+    assert exc_info.value.errors(include_url=False)[0]['type'] == 'url_scheme'
 
 
 def test_amqp_dsns():
@@ -478,7 +539,7 @@ def test_amqp_dsns():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='http://example.org')
-    assert exc_info.value.errors()[0]['type'] == 'url_scheme'
+    assert exc_info.value.errors(include_url=False)[0]['type'] == 'url_scheme'
 
     # Password is not required for AMQP protocol
     m = Model(a='amqp://localhost:1234/app')
@@ -512,7 +573,7 @@ def test_redis_dsns():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='http://example.org')
-    assert exc_info.value.errors()[0]['type'] == 'url_scheme'
+    assert exc_info.value.errors(include_url=False)[0]['type'] == 'url_scheme'
 
     # Password is not required for Redis protocol
     m = Model(a='redis://localhost:1234/app')
@@ -541,7 +602,7 @@ def test_mongodb_dsns():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='http://example.org')
-    assert exc_info.value.errors()[0]['type'] == 'url_scheme'
+    assert exc_info.value.errors(include_url=False)[0]['type'] == 'url_scheme'
 
     # Password is not required for MongoDB protocol
     m = Model(a='mongodb://localhost:1234/app')
@@ -554,6 +615,30 @@ def test_mongodb_dsns():
     assert m.a.scheme == 'mongodb'
     # insert_assert(m.a.hosts())
     assert m.a.hosts() == [{'username': None, 'password': None, 'host': 'localhost', 'port': 27017}]
+
+
+@pytest.mark.parametrize(
+    ('dsn', 'expected'),
+    [
+        ('mongodb://user:pass@localhost/app', 'mongodb://user:pass@localhost:27017/app'),
+        pytest.param(
+            'mongodb+srv://user:pass@localhost/app',
+            'mongodb+srv://user:pass@localhost/app',
+            marks=pytest.mark.xfail(
+                reason=(
+                    'This case is not supported. '
+                    'Check https://github.com/pydantic/pydantic/pull/7116 for more details.'
+                )
+            ),
+        ),
+    ],
+)
+def test_mongodsn_default_ports(dsn: str, expected: str):
+    class Model(BaseModel):
+        dsn: MongoDsn
+
+    m = Model(dsn=dsn)
+    assert str(m.dsn) == expected
 
 
 def test_kafka_dsns():
@@ -571,11 +656,28 @@ def test_kafka_dsns():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(a='http://example.org')
-    assert exc_info.value.errors()[0]['type'] == 'url_scheme'
+    assert exc_info.value.errors(include_url=False)[0]['type'] == 'url_scheme'
 
     m = Model(a='kafka://kafka3:9093')
     assert m.a.username is None
     assert m.a.password is None
+
+
+@pytest.mark.parametrize(
+    'dsn,result',
+    [
+        ('nats://user:pass@localhost:4222', 'nats://user:pass@localhost:4222'),
+        ('tls://user@localhost', 'tls://user@localhost:4222'),
+        ('ws://localhost:2355', 'ws://localhost:2355/'),
+        ('tls://', 'tls://localhost:4222'),
+        ('ws://:password@localhost:9999', 'ws://:password@localhost:9999/'),
+    ],
+)
+def test_nats_dsns(dsn, result):
+    class Model(BaseModel):
+        dsn: NatsDsn
+
+    assert str(Model(dsn=dsn).dsn) == result
 
 
 def test_custom_schemes():
@@ -598,13 +700,66 @@ def test_custom_schemes():
         Model(v='ws:///foo/bar')
 
 
-@pytest.mark.xfail(reason='URL to JSON not yet supported')
+@pytest.mark.parametrize(
+    'options',
+    [
+        # Ensures the hash is generated correctly when a field is null
+        {'max_length': None},
+        {'allowed_schemes': None},
+        {'host_required': None},
+        {'default_host': None},
+        {'default_port': None},
+        {'default_path': None},
+    ],
+)
+def test_url_constraints_hash_equal(options):
+    defaults = {
+        'max_length': 1,
+        'allowed_schemes': ['scheme'],
+        'host_required': False,
+        'default_host': 'host',
+        'default_port': 0,
+        'default_path': 'path',
+    }
+    options = {**defaults, **options}
+    assert hash(UrlConstraints(**options)) == hash(UrlConstraints(**options))
+
+
+@pytest.mark.parametrize(
+    'changes',
+    [
+        {'max_length': 2},
+        {'allowed_schemes': ['new-scheme']},
+        {'host_required': True},
+        {'default_host': 'new-host'},
+        {'default_port': 1},
+        {'default_path': 'new-path'},
+        {'max_length': None},
+        {'allowed_schemes': None},
+        {'host_required': None},
+        {'default_host': None},
+        {'default_port': None},
+        {'default_path': None},
+    ],
+)
+def test_url_constraints_hash_inequal(changes):
+    options = {
+        'max_length': 1,
+        'allowed_schemes': ['scheme'],
+        'host_required': False,
+        'default_host': 'host',
+        'default_port': 0,
+        'default_path': 'path',
+    }
+    assert hash(UrlConstraints(**options)) != hash(UrlConstraints(**{**options, **changes}))
+
+
 def test_json():
     class Model(BaseModel):
         v: HttpUrl
 
     m = Model(v='http://foo@example.net')
-    assert m.model_dump_json() == '{"v": "http://foo@example.net"}'
+    assert m.model_dump_json() == '{"v":"http://foo@example.net/"}'
 
 
 @pytest.mark.skipif(not email_validator, reason='email_validator not installed')
@@ -639,6 +794,8 @@ def test_json():
         ('аррӏе@example.com', 'аррӏе', 'аррӏе@example.com'),
         ('xn--80ak6aa92e@example.com', 'xn--80ak6aa92e', 'xn--80ak6aa92e@example.com'),
         ('葉士豪@臺網中心.tw', '葉士豪', '葉士豪@臺網中心.tw'),
+        ('"first.last" <first.last@example.com>', 'first.last', 'first.last@example.com'),
+        ("Shaquille O'Neal <shaq@example.com>", "Shaquille O'Neal", 'shaq@example.com'),
     ],
 )
 def test_address_valid(value, name, email):
@@ -652,8 +809,8 @@ def test_address_valid(value, name, email):
         ('@example.com', 'There must be something before the @-sign.'),
         ('f oo.bar@example.com', 'The email address contains invalid characters before the @-sign'),
         ('foobar', 'The email address is not valid. It must have exactly one @-sign.'),
-        ('foobar@localhost', 'The domain name localhost is not valid. It should have a period.'),
-        ('foobar@127.0.0.1', 'The domain name 127.0.0.1 is not valid. It is not within a valid top-level domain.'),
+        ('foobar@localhost', 'The part after the @-sign is not valid. It should have a period.'),
+        ('foobar@127.0.0.1', 'The part after the @-sign is not valid. It is not within a valid top-level domain.'),
         ('foo.bar@exam\nple.com ', None),
         ('foobar <foobar@example.com', None),
         ('foobar@.example.com', None),
@@ -667,15 +824,16 @@ def test_address_valid(value, name, email):
         ('\u0020@example.com', None),
         ('\u001f@example.com', None),
         ('"@example.com', None),
-        ('\"@example.com', None),
         (',@example.com', None),
         ('foobar <foobar<@example.com>', None),
         ('foobar <foobar@example.com>>', None),
         ('foobar <<foobar<@example.com>', None),
         ('foobar <>', None),
+        ('first.last <first.last@example.com>', None),
+        pytest.param('foobar <' + 'a' * 4096 + '@example.com>', 'Length must not exceed 2048 characters', id='long'),
     ],
 )
-def test_address_invalid(value, reason):
+def test_address_invalid(value: str, reason: Union[str, None]):
     with pytest.raises(PydanticCustomError, match=f'value is not a valid email address: {reason or ""}'):
         validate_email(value)
 
@@ -693,5 +851,33 @@ def test_name_email():
 
     assert str(Model(v=NameEmail('foo bar', 'foobaR@example.com')).v) == 'foo bar <foobaR@example.com>'
     assert str(Model(v='foo bar  <foobaR@example.com>').v) == 'foo bar <foobaR@example.com>'
+    assert str(Model(v='foobaR@example.com').v) == 'foobaR <foobaR@example.com>'
     assert NameEmail('foo bar', 'foobaR@example.com') == NameEmail('foo bar', 'foobaR@example.com')
     assert NameEmail('foo bar', 'foobaR@example.com') != NameEmail('foo bar', 'different@example.com')
+
+    assert Model.model_validate_json('{"v":"foo bar <foobaR@example.com>"}').v == NameEmail(
+        'foo bar', 'foobaR@example.com'
+    )
+    assert str(Model.model_validate_json('{"v":"foobaR@example.com"}').v) == 'foobaR <foobaR@example.com>'
+    assert (
+        Model(v=NameEmail('foo bar', 'foobaR@example.com')).model_dump_json() == '{"v":"foo bar <foobaR@example.com>"}'
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(v=1)
+    assert exc_info.value.errors() == [
+        {'input': 1, 'loc': ('v',), 'msg': 'Input is not a valid NameEmail', 'type': 'name_email_type'}
+    ]
+
+
+@pytest.mark.skipif(not email_validator, reason='email_validator not installed')
+def test_name_email_serialization():
+    class Model(BaseModel):
+        email: NameEmail
+
+    m = Model.model_validate({'email': '"name@mailbox.com" <name@mailbox.com>'})
+    assert m.email.name == 'name@mailbox.com'
+    assert str(m.email) == '"name@mailbox.com" <name@mailbox.com>'
+
+    obj = json.loads(m.model_dump_json())
+    Model(email=obj['email'])

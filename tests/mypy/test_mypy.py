@@ -1,8 +1,11 @@
+import dataclasses
 import importlib
 import os
 import re
 import sys
+from bisect import insort
 from pathlib import Path
+from typing import Any, List, Optional, Tuple, Union
 
 import pytest
 
@@ -10,104 +13,207 @@ try:
     from mypy import api as mypy_api
     from mypy.version import __version__ as mypy_version
 
-    from pydantic.mypy import parse_mypy_version
+    from pydantic.version import parse_mypy_version
+
 except ImportError:
     mypy_api = None
     mypy_version = None
+
     parse_mypy_version = lambda _: (0,)  # noqa: E731
 
 
-def should_skip():
-    if sys.version_info >= (3, 11):
-        # mypy doesn't fully support 3.11 and tests are taking minutes, see #4738
-        # mypy v0.990 is even worse, see #4735
-        # TODO remove once 3.11 is fully supported by mypy
-        return True
-    else:
-        return sys.platform != 'linux' and 'CI' in os.environ
+MYPY_VERSION_TUPLE = parse_mypy_version(mypy_version)
+PYDANTIC_ROOT = Path(__file__).parent.parent.parent
 
-
-pytestmark = pytest.mark.skipif(should_skip(), reason='Skip on 3.11, only run on linux when on CI')
+pytestmark = pytest.mark.skipif(
+    '--test-mypy' not in sys.argv
+    and os.environ.get('PYCHARM_HOSTED') != '1',  # never skip when running via the PyCharm runner
+    reason='Test only with "--test-mypy" flag',
+)
 
 # This ensures mypy can find the test files, no matter where tests are run from:
 os.chdir(Path(__file__).parent.parent.parent)
 
-cases = [
-    ('mypy-plugin.ini', 'plugin_success.py', None),
-    ('mypy-plugin.ini', 'plugin_fail.py', 'plugin-fail.txt'),
-    ('mypy-plugin.ini', 'custom_constructor.py', 'custom_constructor.txt'),
-    ('mypy-plugin-strict.ini', 'plugin_success.py', 'plugin-success-strict.txt'),
-    ('mypy-plugin-strict.ini', 'plugin_fail.py', 'plugin-fail-strict.txt'),
-    ('mypy-plugin-strict.ini', 'fail_defaults.py', 'fail_defaults.txt'),
-    ('mypy-default.ini', 'success.py', None),
-    ('mypy-default.ini', 'fail1.py', 'fail1.txt'),
-    ('mypy-default.ini', 'fail2.py', 'fail2.txt'),
-    ('mypy-default.ini', 'fail3.py', 'fail3.txt'),
-    ('mypy-default.ini', 'fail4.py', 'fail4.txt'),
-    ('mypy-default.ini', 'plugin_success.py', 'plugin_success.txt'),
-    pytest.param(
-        'mypy-plugin-strict-no-any.ini', 'dataclass_no_any.py', None, marks=pytest.mark.xfail(reason='TODO dataclasses')
-    ),
-    ('pyproject-default.toml', 'success.py', None),
-    ('pyproject-default.toml', 'fail1.py', 'fail1.txt'),
-    ('pyproject-default.toml', 'fail2.py', 'fail2.txt'),
-    ('pyproject-default.toml', 'fail3.py', 'fail3.txt'),
-    ('pyproject-default.toml', 'fail4.py', 'fail4.txt'),
-    ('pyproject-plugin.toml', 'plugin_success.py', None),
-    ('pyproject-plugin.toml', 'plugin_fail.py', 'plugin-fail.txt'),
-    ('pyproject-plugin-strict.toml', 'plugin_success.py', 'plugin-success-strict.txt'),
-    ('pyproject-plugin-strict.toml', 'plugin_fail.py', 'plugin-fail-strict.txt'),
-    ('pyproject-plugin-strict.toml', 'fail_defaults.py', 'fail_defaults.txt'),
-    ('mypy-plugin-strict.ini', 'plugin_default_factory.py', 'plugin_default_factory.txt'),
-]
-executable_modules = list({fname[:-3] for _, fname, out_fname in cases if out_fname is None})
+
+@dataclasses.dataclass
+class MypyCasesBuilder:
+    configs: Union[str, List[str]]
+    modules: Union[str, List[str]]
+    marks: Any = None
+
+    def build(self) -> List[Union[Tuple[str, str], Any]]:
+        """
+        Produces the cartesian product of the configs and modules, optionally with marks.
+        """
+        if isinstance(self.configs, str):
+            self.configs = [self.configs]
+        if isinstance(self.modules, str):
+            self.modules = [self.modules]
+        built_cases = []
+        for config in self.configs:
+            for module in self.modules:
+                built_cases.append((config, module))
+        if self.marks is not None:
+            built_cases = [pytest.param(config, module, marks=self.marks) for config, module in built_cases]
+        return built_cases
 
 
-@pytest.mark.skipif(not mypy_api, reason='mypy is not installed')
-@pytest.mark.parametrize('config_filename,python_filename,output_filename', cases)
-def test_mypy_results(config_filename: str, python_filename: str, output_filename: str) -> None:
-    full_config_filename = f'tests/mypy/configs/{config_filename}'
-    full_filename = f'tests/mypy/modules/{python_filename}'
-    output_path = None if output_filename is None else Path(f'tests/mypy/outputs/{output_filename}')
+cases = (
+    # No plugin
+    MypyCasesBuilder(
+        ['mypy-default.ini', 'pyproject-default.toml'],
+        ['fail1.py', 'fail2.py', 'fail3.py', 'fail4.py', 'pydantic_settings.py'],
+    ).build()
+    + MypyCasesBuilder(
+        ['mypy-default.ini', 'pyproject-default.toml'],
+        'success.py',
+        pytest.mark.skipif(MYPY_VERSION_TUPLE > (1, 0, 1), reason='Need to handle some more things for mypy >=1.1.1'),
+    ).build()
+    + MypyCasesBuilder(
+        ['mypy-default.ini', 'pyproject-default.toml'],
+        'root_models.py',
+        pytest.mark.skipif(
+            MYPY_VERSION_TUPLE < (1, 1, 1), reason='`dataclass_transform` only supported on mypy >= 1.1.1'
+        ),
+    ).build()
+    + MypyCasesBuilder(
+        'mypy-default.ini', ['plugin_success.py', 'plugin_success_baseConfig.py', 'metaclass_args.py']
+    ).build()
+    # Default plugin config
+    + MypyCasesBuilder(
+        ['mypy-plugin.ini', 'pyproject-plugin.toml'],
+        [
+            'plugin_success.py',
+            'plugin_fail.py',
+            'plugin_success_baseConfig.py',
+            'plugin_fail_baseConfig.py',
+            'pydantic_settings.py',
+        ],
+    ).build()
+    # Strict plugin config
+    + MypyCasesBuilder(
+        ['mypy-plugin-strict.ini', 'pyproject-plugin-strict.toml'],
+        [
+            'plugin_success.py',
+            'plugin_fail.py',
+            'fail_defaults.py',
+            'plugin_success_baseConfig.py',
+            'plugin_fail_baseConfig.py',
+        ],
+    ).build()
+    # One-off cases
+    + [
+        ('mypy-plugin.ini', 'custom_constructor.py'),
+        ('mypy-plugin.ini', 'generics.py'),
+        ('mypy-plugin.ini', 'root_models.py'),
+        ('mypy-plugin-strict.ini', 'plugin_default_factory.py'),
+        ('mypy-plugin-strict-no-any.ini', 'dataclass_no_any.py'),
+        ('mypy-plugin-very-strict.ini', 'metaclass_args.py'),
+        ('pyproject-default.toml', 'computed_fields.py'),
+        ('pyproject-default.toml', 'with_config_decorator.py'),
+        ('pyproject-plugin-no-strict-optional.toml', 'no_strict_optional.py'),
+        ('pyproject-plugin-strict-equality.toml', 'strict_equality.py'),
+    ]
+)
+
+
+@dataclasses.dataclass
+class MypyTestTarget:
+    parsed_mypy_version: Tuple[int, ...]
+    output_path: Path
+
+
+@dataclasses.dataclass
+class MypyTestConfig:
+    existing: Optional[MypyTestTarget]  # the oldest target with an output that is no older than the installed mypy
+    current: MypyTestTarget  # the target for the current installed mypy
+
+
+def get_test_config(module_path: Path, config_path: Path) -> MypyTestConfig:
+    outputs_dir = PYDANTIC_ROOT / 'tests/mypy/outputs'
+    outputs_dir.mkdir(exist_ok=True)
+    existing_versions = [
+        x.name for x in outputs_dir.iterdir() if x.is_dir() and re.match(r'[0-9]+(?:\.[0-9]+)*', x.name)
+    ]
+
+    def _convert_to_output_path(v: str) -> Path:
+        return outputs_dir / v / config_path.name.replace('.', '_') / module_path.name
+
+    existing = None
+
+    # Build sorted list of (parsed_version, version) pairs, including the current mypy version being used
+    parsed_version_pairs = sorted([(parse_mypy_version(v), v) for v in existing_versions])
+    if MYPY_VERSION_TUPLE not in [x[0] for x in parsed_version_pairs]:
+        insort(parsed_version_pairs, (MYPY_VERSION_TUPLE, mypy_version))
+
+    for parsed_version, version in parsed_version_pairs[::-1]:
+        if parsed_version > MYPY_VERSION_TUPLE:
+            continue
+        output_path = _convert_to_output_path(version)
+        if output_path.exists():
+            existing = MypyTestTarget(parsed_version, output_path)
+            break
+
+    current = MypyTestTarget(MYPY_VERSION_TUPLE, _convert_to_output_path(mypy_version))
+    return MypyTestConfig(existing, current)
+
+
+@pytest.mark.filterwarnings('ignore:ast.:DeprecationWarning')  # these are produced by mypy in python 3.12
+@pytest.mark.parametrize('config_filename,python_filename', cases)
+def test_mypy_results(config_filename: str, python_filename: str, request: pytest.FixtureRequest) -> None:
+    input_path = PYDANTIC_ROOT / 'tests/mypy/modules' / python_filename
+    config_path = PYDANTIC_ROOT / 'tests/mypy/configs' / config_filename
+    test_config = get_test_config(input_path, config_path)
 
     # Specifying a different cache dir for each configuration dramatically speeds up subsequent execution
     # It also prevents cache-invalidation-related bugs in the tests
     cache_dir = f'.mypy_cache/test-{os.path.splitext(config_filename)[0]}'
-    command = [full_filename, '--config-file', full_config_filename, '--cache-dir', cache_dir, '--show-error-codes']
-    if parse_mypy_version(mypy_version) >= (0, 990):
-        command.append('--disable-recursive-aliases')
+    command = [
+        str(input_path),
+        '--config-file',
+        str(config_path),
+        '--cache-dir',
+        cache_dir,
+        '--show-error-codes',
+        '--show-traceback',
+    ]
     print(f"\nExecuting: mypy {' '.join(command)}")  # makes it easier to debug as necessary
-    actual_result = mypy_api.run(command)
-    actual_out, actual_err, actual_returncode = actual_result
+    mypy_out, mypy_err, mypy_returncode = mypy_api.run(command)
+
     # Need to strip filenames due to differences in formatting by OS
-    actual_out = '\n'.join(['.py:'.join(line.split('.py:')[1:]) for line in actual_out.split('\n') if line]).strip()
-    actual_out = re.sub(r'\n\s*\n', r'\n', actual_out)
+    mypy_out = '\n'.join(['.py:'.join(line.split('.py:')[1:]) for line in mypy_out.split('\n') if line]).strip()
+    mypy_out = re.sub(r'\n\s*\n', r'\n', mypy_out)
+    if mypy_out:
+        print('{0}\n{1:^100}\n{0}\n{2}\n{0}'.format('=' * 100, f'mypy {mypy_version} output', mypy_out))
+    assert mypy_err == ''
 
-    if actual_out:
-        print('{0}\n{1:^100}\n{0}\n{2}\n{0}'.format('=' * 100, 'mypy output', actual_out))
+    input_code = input_path.read_text()
 
-    assert actual_err == ''
-    expected_returncode = 0 if output_filename is None else 1
-    assert actual_returncode == expected_returncode
+    existing_output_code: Optional[str] = None
+    if test_config.existing is not None:
+        existing_output_code = test_config.existing.output_path.read_text()
+        print(f'Comparing output with {test_config.existing.output_path}')
+    else:
+        print('Expecting no mypy errors')
 
-    if output_path and not output_path.exists():
-        output_path.write_text(actual_out)
-        raise RuntimeError(f'wrote actual output to {output_path} since file did not exist')
+    merged_output = merge_python_and_mypy_output(input_code, mypy_out)
 
-    expected_out = Path(output_path).read_text().rstrip('\n') if output_path else ''
+    if merged_output == existing_output_code:
+        # Test passed, no changes needed
+        pass
+    elif request.config.getoption('update_mypy'):
+        test_config.current.output_path.parent.mkdir(parents=True, exist_ok=True)
+        test_config.current.output_path.write_text(merged_output)
+    else:
+        print('**** Merged Output ****')
+        print(merged_output)
+        print('***********************')
+        assert existing_output_code is not None, 'No output file found, run `make test-mypy-update` to create it'
+        assert merged_output == existing_output_code
+        expected_returncode = get_expected_return_code(existing_output_code)
+        assert mypy_returncode == expected_returncode
 
-    # fix for compatibility between mypy versions: (this can be dropped once we drop support for mypy<0.930)
-    if actual_out and parse_mypy_version(mypy_version) < (0, 930):
-        actual_out = actual_out.lower()
-        expected_out = expected_out.lower()
-        actual_out = actual_out.replace('variant:', 'variants:')
-        actual_out = re.sub(r'^(\d+: note: {4}).*', r'\1...', actual_out, flags=re.M)
-        expected_out = re.sub(r'^(\d+: note: {4}).*', r'\1...', expected_out, flags=re.M)
 
-    assert actual_out == expected_out, actual_out
-
-
-@pytest.mark.skipif(not mypy_api, reason='mypy is not installed')
 def test_bad_toml_config() -> None:
     full_config_filename = 'tests/mypy/configs/pyproject-plugin-bad-param.toml'
     full_filename = 'tests/mypy/modules/success.py'
@@ -116,7 +222,7 @@ def test_bad_toml_config() -> None:
     # It also prevents cache-invalidation-related bugs in the tests
     cache_dir = '.mypy_cache/test-pyproject-plugin-bad-param'
     command = [full_filename, '--config-file', full_config_filename, '--cache-dir', cache_dir, '--show-error-codes']
-    if parse_mypy_version(mypy_version) >= (0, 990):
+    if MYPY_VERSION_TUPLE >= (0, 990):
         command.append('--disable-recursive-aliases')
     print(f"\nExecuting: mypy {' '.join(command)}")  # makes it easier to debug as necessary
     with pytest.raises(ValueError) as e:
@@ -125,8 +231,15 @@ def test_bad_toml_config() -> None:
     assert str(e.value) == 'Configuration value must be a boolean for key: init_forbid_extra'
 
 
-@pytest.mark.xfail(reason='todo')
-@pytest.mark.parametrize('module', executable_modules)
+def get_expected_return_code(source_code: str) -> int:
+    if re.findall(r'^\s*# MYPY:', source_code, flags=re.MULTILINE):
+        return 1
+    return 0
+
+
+@pytest.mark.parametrize('module', ['dataclass_no_any', 'plugin_success', 'plugin_success_baseConfig'])
+@pytest.mark.filterwarnings('ignore:.*is deprecated.*:DeprecationWarning')
+@pytest.mark.filterwarnings('ignore:.*are deprecated.*:DeprecationWarning')
 def test_success_cases_run(module: str) -> None:
     """
     Ensure the "success" files can actually be executed
@@ -136,9 +249,9 @@ def test_success_cases_run(module: str) -> None:
 
 def test_explicit_reexports():
     from pydantic import __all__ as root_all
+    from pydantic.deprecated.tools import __all__ as tools
     from pydantic.main import __all__ as main
     from pydantic.networks import __all__ as networks
-    from pydantic.tools import __all__ as tools
     from pydantic.types import __all__ as types
 
     for name, export_all in [('main', main), ('network', networks), ('tools', tools), ('types', types)]:
@@ -153,7 +266,6 @@ def test_explicit_reexports_exist():
         assert hasattr(pydantic, name), f'{name} is in pydantic.__all__ but missing from pydantic'
 
 
-@pytest.mark.skipif(mypy_version is None, reason='mypy is not installed')
 @pytest.mark.parametrize(
     'v_str,v_tuple',
     [
@@ -164,3 +276,21 @@ def test_explicit_reexports_exist():
 )
 def test_parse_mypy_version(v_str, v_tuple):
     assert parse_mypy_version(v_str) == v_tuple
+
+
+def merge_python_and_mypy_output(source_code: str, mypy_output: str) -> str:
+    merged_lines = [(line, False) for line in source_code.splitlines()]
+
+    for line in mypy_output.splitlines()[::-1]:
+        if not line:
+            continue
+        try:
+            line_number, message = re.split(r':(?:\d+:)?', line, maxsplit=1)
+            merged_lines.insert(int(line_number), (f'# MYPY: {message.strip()}', True))
+        except ValueError:
+            # This could happen due to lack of a ':' in `line`, or the pre-':' contents not being a number
+            # Either way, put all such lines at the top of the file
+            merged_lines.insert(0, (f'# MYPY: {line.strip()}', True))
+
+    merged_lines = [line for line, is_mypy in merged_lines if is_mypy or not line.strip().startswith('# MYPY: ')]
+    return '\n'.join(merged_lines) + '\n'

@@ -2,10 +2,15 @@ from collections import namedtuple
 from typing import Any
 
 import pytest
-from pydantic_core._pydantic_core import PydanticCustomError
+from pydantic_core import PydanticCustomError
 
 from pydantic import BaseModel, ValidationError
 from pydantic.types import PaymentCardBrand, PaymentCardNumber
+
+pytestmark = pytest.mark.filterwarnings(
+    'ignore:' 'The `PaymentCardNumber` class is deprecated, use `pydantic_extra_types` instead.*' ':DeprecationWarning'
+)
+
 
 VALID_AMEX = '370000000000002'
 VALID_MC = '5100000000000003'
@@ -19,7 +24,7 @@ LEN_INVALID = '40000000000000006'
 
 # Mock PaymentCardNumber
 PCN = namedtuple('PaymentCardNumber', ['card_number', 'brand'])
-PCN.__len__ = lambda v: len(v.card_number)  # noqa: E731
+PCN.__len__ = lambda v: len(v.card_number)
 
 
 @pytest.fixture(scope='session', name='PaymentCard')

@@ -1,17 +1,31 @@
 """
 PYTEST_DONT_REWRITE
 """
-import pytest
+import difflib
+import pprint
 
-from pydantic import BaseModel, ValidationError, validator
+import pytest
+from dirty_equals import HasRepr
+
+from pydantic import BaseModel, ValidationError, field_validator
+
+
+def _pformat_lines(obj):
+    return pprint.pformat(obj).splitlines(keepends=True)
+
+
+def _assert_eq(left, right):
+    if left != right:
+        pytest.fail('\n' + '\n'.join(difflib.ndiff(_pformat_lines(left), _pformat_lines(right))))
 
 
 def test_assert_raises_validation_error():
     class Model(BaseModel):
         a: str
 
-        @validator('a')
-        def check_a(cls, v, **kwargs):
+        @field_validator('a')
+        @classmethod
+        def check_a(cls, v):
             assert v == 'a', 'invalid a'
             return v
 
@@ -20,15 +34,15 @@ def test_assert_raises_validation_error():
     with pytest.raises(ValidationError) as exc_info:
         Model(a='snap')
 
-    expected_errors = [
-        {
-            'type': 'assertion_error',
-            'loc': ('a',),
-            'msg': 'Assertion failed, invalid a',
-            'input': 'snap',
-            'ctx': {'error': 'invalid a'},
-        }
-    ]
-    actual_errors = exc_info.value.errors()
-    if expected_errors != actual_errors:
-        pytest.fail(f'Actual errors: {actual_errors}\nExpected errors: {expected_errors}')
+    _assert_eq(
+        [
+            {
+                'ctx': {'error': HasRepr(repr(AssertionError('invalid a')))},
+                'input': 'snap',
+                'loc': ('a',),
+                'msg': 'Assertion failed, invalid a',
+                'type': 'assertion_error',
+            }
+        ],
+        exc_info.value.errors(include_url=False),
+    )

@@ -3,14 +3,55 @@ from datetime import date, datetime, time, timedelta, timezone
 
 import pytest
 from dirty_equals import HasRepr
+from typing_extensions import Annotated
 
-from pydantic import BaseModel, FutureDate, PastDate, ValidationError, condate
+from pydantic import (
+    AwareDatetime,
+    BaseModel,
+    FutureDate,
+    FutureDatetime,
+    NaiveDatetime,
+    PastDate,
+    PastDatetime,
+    ValidationError,
+    condate,
+)
 
 from .conftest import Err
 
 
 def create_tz(minutes):
     return timezone(timedelta(minutes=minutes))
+
+
+@pytest.fixture(scope='module', params=[FutureDate, Annotated[date, FutureDate()]])
+def future_date_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[PastDate, Annotated[date, PastDate()]])
+def past_date_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[FutureDatetime, Annotated[datetime, FutureDatetime()]])
+def future_datetime_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[PastDatetime, Annotated[datetime, PastDatetime()]])
+def past_datetime_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[AwareDatetime, Annotated[datetime, AwareDatetime()]])
+def aware_datetime_type(request):
+    return request.param
+
+
+@pytest.fixture(scope='module', params=[NaiveDatetime, Annotated[datetime, NaiveDatetime()]])
+def naive_datetime_type(request):
+    return request.param
 
 
 @pytest.fixture(scope='module', name='DateModel')
@@ -75,9 +116,9 @@ def time_model_fixture():
         ('10:20:30.400', time(10, 20, 30, 400_000)),
         (b'10:20:30.400', time(10, 20, 30, 400_000)),
         (time(4, 8, 16), time(4, 8, 16)),
-        (3610, time(1, 0, 10)),
-        (3600.5, time(1, 0, 0, 500000)),
-        (86400 - 1, time(23, 59, 59)),
+        (3610, time(1, 0, 10, tzinfo=timezone.utc)),
+        (3600.5, time(1, 0, 0, 500000, tzinfo=timezone.utc)),
+        (86400 - 1, time(23, 59, 59, tzinfo=timezone.utc)),
         # Invalid inputs
         ('4:8:16', Err('Input should be in a valid time format, invalid character in hour [type=time_parsing,')),
         (86400, Err('Input should be in a valid time format, numeric times may not exceed 86,399 seconds')),
@@ -85,15 +126,15 @@ def time_model_fixture():
         ('091500', Err('Input should be in a valid time format, invalid time separator, expected `:`')),
         (b'091500', Err('Input should be in a valid time format, invalid time separator, expected `:`')),
         ('09:15:90', Err('Input should be in a valid time format, second value is outside expected range of 0-59')),
-        ('11:05:00Y', Err('Input should be in a valid time format, unexpected extra characters at the end of the inp')),
-        # # https://github.com/pydantic/speedate/issues/10
-        # ('11:05:00-05:30', time(11, 5, 0, tzinfo=create_tz(-330))),
-        # ('11:05:00-0530', time(11, 5, 0, tzinfo=create_tz(-330))),
-        # ('11:05:00Z', time(11, 5, 0, tzinfo=timezone.utc)),
-        # ('11:05:00+00', time(11, 5, 0, tzinfo=timezone.utc)),
-        # ('11:05-06', time(11, 5, 0, tzinfo=create_tz(-360))),
-        # ('11:05+06', time(11, 5, 0, tzinfo=create_tz(360))),
-        # ('11:05:00-25:00', errors.TimeError),
+        ('11:05:00Y', Err('Input should be in a valid time format, invalid timezone sign')),
+        # https://github.com/pydantic/speedate/issues/10
+        ('11:05:00-05:30', time(11, 5, 0, tzinfo=create_tz(-330))),
+        ('11:05:00-0530', time(11, 5, 0, tzinfo=create_tz(-330))),
+        ('11:05:00Z', time(11, 5, 0, tzinfo=timezone.utc)),
+        ('11:05:00+00:00', time(11, 5, 0, tzinfo=timezone.utc)),
+        ('11:05-06:00', time(11, 5, 0, tzinfo=create_tz(-360))),
+        ('11:05+06:00', time(11, 5, 0, tzinfo=create_tz(360))),
+        ('11:05:00-25:00', Err('Input should be in a valid time format, timezone offset must be less than 24 hours')),
     ],
 )
 def test_time_parsing(TimeModel, value, result):
@@ -117,10 +158,10 @@ def datetime_model_fixture():
     [
         # Valid inputs
         # values in seconds
-        (1_494_012_444.883_309, datetime(2017, 5, 5, 19, 27, 24, 883_309)),
-        (1_494_012_444, datetime(2017, 5, 5, 19, 27, 24)),
+        (1_494_012_444.883_309, datetime(2017, 5, 5, 19, 27, 24, 883_309, tzinfo=timezone.utc)),
+        (1_494_012_444, datetime(2017, 5, 5, 19, 27, 24, tzinfo=timezone.utc)),
         # values in ms
-        (1_494_012_444_000, datetime(2017, 5, 5, 19, 27, 24)),
+        (1_494_012_444_000, datetime(2017, 5, 5, 19, 27, 24, tzinfo=timezone.utc)),
         ('2012-04-23T09:15:00', datetime(2012, 4, 23, 9, 15)),
         ('2012-04-23T09:15:00Z', datetime(2012, 4, 23, 9, 15, 0, 0, timezone.utc)),
         ('2012-04-23T10:20:30.400+02:30', datetime(2012, 4, 23, 10, 20, 30, 400_000, create_tz(150))),
@@ -128,24 +169,20 @@ def datetime_model_fixture():
         ('2012-04-23T10:20:30.400-02:00', datetime(2012, 4, 23, 10, 20, 30, 400_000, create_tz(-120))),
         (b'2012-04-23T10:20:30.400-02:00', datetime(2012, 4, 23, 10, 20, 30, 400_000, create_tz(-120))),
         (datetime(2017, 5, 5), datetime(2017, 5, 5)),
-        (0, datetime(1970, 1, 1, 0, 0, 0)),
-        # # Invalid inputs
-        ('1494012444.883309', Err('Input should be a valid datetime, invalid date separator')),
-        ('1494012444', Err('Input should be a valid datetime, invalid date separator')),
-        (b'1494012444', Err('Input should be a valid datetime, invalid date separator')),
-        ('1494012444000.883309', Err('Input should be a valid datetime, invalid date separator')),
-        ('-1494012444000.883309', Err('Input should be a valid datetime, invalid character in year')),
-        ('2012-4-9 4:8:16', Err('Input should be a valid datetime, invalid character in month')),
-        ('x20120423091500', Err('Input should be a valid datetime, invalid character in year')),
-        ('2012-04-56T09:15:90', Err('Input should be a valid datetime, day value is outside expected range')),
-        ('2012-04-23T11:05:00-25:00', Err('Input should be a valid datetime, timezone offset must be less than 24 ho')),
-        (19_999_999_999, datetime(2603, 10, 11, 11, 33, 19)),  # just before watershed
-        (20_000_000_001, datetime(1970, 8, 20, 11, 33, 20, 1000)),  # just after watershed
-        (1_549_316_052, datetime(2019, 2, 4, 21, 34, 12, 0)),  # nowish in s
-        (1_549_316_052_104, datetime(2019, 2, 4, 21, 34, 12, 104_000)),  # nowish in ms
+        (0, datetime(1970, 1, 1, 0, 0, 0, tzinfo=timezone.utc)),
+        # Numeric inputs as strings
+        ('1494012444.883309', datetime(2017, 5, 5, 19, 27, 24, 883309, tzinfo=timezone.utc)),
+        ('1494012444', datetime(2017, 5, 5, 19, 27, 24, tzinfo=timezone.utc)),
+        (b'1494012444', datetime(2017, 5, 5, 19, 27, 24, tzinfo=timezone.utc)),
+        ('1494012444000.883309', datetime(2017, 5, 5, 19, 27, 24, 883301, tzinfo=timezone.utc)),
+        ('-1494012444000.883309', datetime(1922, 8, 29, 4, 32, 35, 999000, tzinfo=timezone.utc)),
+        (19_999_999_999, datetime(2603, 10, 11, 11, 33, 19, tzinfo=timezone.utc)),  # just before watershed
+        (20_000_000_001, datetime(1970, 8, 20, 11, 33, 20, 1000, tzinfo=timezone.utc)),  # just after watershed
+        (1_549_316_052, datetime(2019, 2, 4, 21, 34, 12, 0, tzinfo=timezone.utc)),  # nowish in s
+        (1_549_316_052_104, datetime(2019, 2, 4, 21, 34, 12, 104_000, tzinfo=timezone.utc)),  # nowish in ms
+        # Invalid inputs
         (1_549_316_052_104_324, Err('Input should be a valid datetime, dates after 9999')),  # nowish in μs
         (1_549_316_052_104_324_096, Err('Input should be a valid datetime, dates after 9999')),  # nowish in ns
-        ('infinity', Err('Input should be a valid datetime, input is too short')),
         (float('inf'), Err('Input should be a valid datetime, dates after 9999')),
         (float('-inf'), Err('Input should be a valid datetime, dates before 1600')),
         (1e50, Err('Input should be a valid datetime, dates after 9999')),
@@ -158,6 +195,84 @@ def test_datetime_parsing(DatetimeModel, value, result):
             DatetimeModel(dt=value)
     else:
         assert DatetimeModel(dt=value).dt == result
+
+
+@pytest.mark.parametrize(
+    'value,result',
+    [
+        # Invalid inputs
+        ('2012-4-9 4:8:16', Err('Input should be a valid datetime or date, invalid character in month')),
+        ('x20120423091500', Err('Input should be a valid datetime or date, invalid character in year')),
+        ('2012-04-56T09:15:90', Err('Input should be a valid datetime or date, day value is outside expected range')),
+        (
+            '2012-04-23T11:05:00-25:00',
+            Err('Input should be a valid datetime or date, unexpected extra characters at the end of the input'),
+        ),
+        ('infinity', Err('Input should be a valid datetime or date, input is too short')),
+    ],
+)
+def test_datetime_parsing_from_str(DatetimeModel, value, result):
+    if isinstance(result, Err):
+        with pytest.raises(ValidationError, match=result.message_escaped()):
+            DatetimeModel(dt=value)
+    else:
+        assert DatetimeModel(dt=value).dt == result
+
+
+def test_aware_datetime_validation_success(aware_datetime_type):
+    class Model(BaseModel):
+        foo: aware_datetime_type
+
+    value = datetime.now(tz=timezone.utc)
+
+    assert Model(foo=value).foo == value
+
+
+def test_aware_datetime_validation_fails(aware_datetime_type):
+    class Model(BaseModel):
+        foo: aware_datetime_type
+
+    value = datetime.now()
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=value)
+
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'timezone_aware',
+            'loc': ('foo',),
+            'msg': 'Input should have timezone info',
+            'input': value,
+        }
+    ]
+
+
+def test_naive_datetime_validation_success(naive_datetime_type):
+    class Model(BaseModel):
+        foo: naive_datetime_type
+
+    value = datetime.now()
+
+    assert Model(foo=value).foo == value
+
+
+def test_naive_datetime_validation_fails(naive_datetime_type):
+    class Model(BaseModel):
+        foo: naive_datetime_type
+
+    value = datetime.now(tz=timezone.utc)
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=value)
+
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'timezone_naive',
+            'loc': ('foo',),
+            'msg': 'Input should not have timezone info',
+            'input': value,
+        }
+    ]
 
 
 @pytest.fixture(scope='module', name='TimedeltaModel')
@@ -265,8 +380,8 @@ def test_model_type_errors(field, value, error_message):
 
     with pytest.raises(ValidationError) as exc_info:
         Model(**{field: value})
-    assert len(exc_info.value.errors()) == 1
-    error = exc_info.value.errors()[0]
+    assert len(exc_info.value.errors(include_url=False)) == 1
+    error = exc_info.value.errors(include_url=False)[0]
     assert error['msg'] == error_message
 
 
@@ -291,8 +406,8 @@ def test_nan():
 
     with pytest.raises(ValidationError) as exc_info:
         Model(dt=float('nan'), d=float('nan'))
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'datetime_parsing',
             'loc': ('dt',),
@@ -340,9 +455,9 @@ def test_date_constraints(constraint, msg, ok_value, error_value):
         (date(1996, 1, 22), date(1996, 1, 22)),
     ),
 )
-def test_past_date_validation_success(value, result):
+def test_past_date_validation_success(value, result, past_date_type):
     class Model(BaseModel):
-        foo: PastDate
+        foo: past_date_type
 
     assert Model(foo=value).foo == result
 
@@ -355,14 +470,14 @@ def test_past_date_validation_success(value, result):
         '2064-06-01',
     ),
 )
-def test_past_date_validation_fails(value):
+def test_past_date_validation_fails(value, past_date_type):
     class Model(BaseModel):
-        foo: PastDate
+        foo: past_date_type
 
     with pytest.raises(ValidationError) as exc_info:
         Model(foo=value)
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'date_past',
             'loc': ('foo',),
@@ -379,9 +494,9 @@ def test_past_date_validation_fails(value):
         ('2064-06-01', date(2064, 6, 1)),
     ),
 )
-def test_future_date_validation_success(value, result):
+def test_future_date_validation_success(value, result, future_date_type):
     class Model(BaseModel):
-        foo: FutureDate
+        foo: future_date_type
 
     assert Model(foo=value).foo == result
 
@@ -394,14 +509,14 @@ def test_future_date_validation_success(value, result):
         '1996-01-22',
     ),
 )
-def test_future_date_validation_fails(value):
+def test_future_date_validation_fails(value, future_date_type):
     class Model(BaseModel):
-        foo: FutureDate
+        foo: future_date_type
 
     with pytest.raises(ValidationError) as exc_info:
         Model(foo=value)
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'date_future',
             'loc': ('foo',),
@@ -409,3 +524,113 @@ def test_future_date_validation_fails(value):
             'input': value,
         }
     ]
+
+
+@pytest.mark.parametrize(
+    'value,result',
+    (
+        ('1996-01-22T10:20:30', datetime(1996, 1, 22, 10, 20, 30)),
+        (datetime(1996, 1, 22, 10, 20, 30), datetime(1996, 1, 22, 10, 20, 30)),
+    ),
+)
+def test_past_datetime_validation_success(value, result, past_datetime_type):
+    class Model(BaseModel):
+        foo: past_datetime_type
+
+    assert Model(foo=value).foo == result
+
+
+@pytest.mark.parametrize(
+    'value',
+    (
+        datetime.now() + timedelta(1),
+        '2064-06-01T10:20:30',
+    ),
+)
+def test_past_datetime_validation_fails(value, past_datetime_type):
+    class Model(BaseModel):
+        foo: past_datetime_type
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=value)
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'datetime_past',
+            'loc': ('foo',),
+            'msg': 'Input should be in the past',
+            'input': value,
+        }
+    ]
+
+
+def test_future_datetime_validation_success(future_datetime_type):
+    class Model(BaseModel):
+        foo: future_datetime_type
+
+    d = datetime.now() + timedelta(1)
+    assert Model(foo=d).foo == d
+    assert Model(foo='2064-06-01T10:20:30').foo == datetime(2064, 6, 1, 10, 20, 30)
+
+
+@pytest.mark.parametrize(
+    'value',
+    (
+        datetime.now(),
+        datetime.now() - timedelta(1),
+        '1996-01-22T10:20:30',
+    ),
+)
+def test_future_datetime_validation_fails(value, future_datetime_type):
+    class Model(BaseModel):
+        foo: future_datetime_type
+
+    with pytest.raises(ValidationError) as exc_info:
+        Model(foo=value)
+    assert exc_info.value.errors(include_url=False) == [
+        {
+            'type': 'datetime_future',
+            'loc': ('foo',),
+            'msg': 'Input should be in the future',
+            'input': value,
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    'annotation',
+    (
+        PastDate,
+        PastDatetime,
+        FutureDate,
+        FutureDatetime,
+        NaiveDatetime,
+        AwareDatetime,
+    ),
+)
+def test_invalid_annotated_type(annotation):
+    with pytest.raises(TypeError, match=f"'{annotation.__name__}' cannot annotate 'str'."):
+
+        class Model(BaseModel):
+            foo: Annotated[str, annotation()]
+
+
+def test_tzinfo_could_be_reused():
+    class Model(BaseModel):
+        value: datetime
+
+    m = Model(value='2015-10-21T15:28:00.000000+01:00')
+    assert m.model_dump_json() == '{"value":"2015-10-21T15:28:00+01:00"}'
+
+    target = datetime(1955, 11, 12, 14, 38, tzinfo=m.value.tzinfo)
+    assert target == datetime(1955, 11, 12, 14, 38, tzinfo=timezone(timedelta(hours=1)))
+
+    now = datetime.now(tz=m.value.tzinfo)
+    assert isinstance(now, datetime)
+
+
+def test_datetime_from_date_str():
+    class Model(BaseModel):
+        value: datetime
+
+    m = Model(value='2015-10-21')
+    assert m.value == datetime(2015, 10, 21, 0, 0)

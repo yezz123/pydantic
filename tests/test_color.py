@@ -6,6 +6,10 @@ from pydantic_core import PydanticCustomError
 from pydantic import BaseModel, ValidationError
 from pydantic.color import Color
 
+pytestmark = pytest.mark.filterwarnings(
+    'ignore:The `Color` class is deprecated, use `pydantic_extra_types` instead.*:DeprecationWarning'
+)
+
 
 @pytest.mark.parametrize(
     'raw_color, as_tuple',
@@ -40,6 +44,12 @@ from pydantic.color import Color
         ('rgba(00,0,128,0.6  )', (0, 0, 128, 0.6)),
         ('rgba(0, 0, 128, 0)', (0, 0, 128, 0)),
         ('rgba(0, 0, 128, 1)', (0, 0, 128)),
+        ('rgb(0 0.2 205)', (0, 0, 205)),
+        ('rgb(0 0.2 205 / 0.6)', (0, 0, 205, 0.6)),
+        ('rgb(0 0.2 205 / 60%)', (0, 0, 205, 0.6)),
+        ('rgba(0 0 128)', (0, 0, 128)),
+        ('rgba(0 0 128 / 0.6)', (0, 0, 128, 0.6)),
+        ('rgba(0 0 128 / 60%)', (0, 0, 128, 0.6)),
         ('hsl(270, 60%, 70%)', (178, 133, 224)),
         ('hsl(180, 100%, 50%)', (0, 255, 255)),
         ('hsl(630, 60%, 70%)', (178, 133, 224)),
@@ -51,6 +61,11 @@ from pydantic.color import Color
         ('hsl(10.9955rad, 60%, 70%)', (178, 133, 224)),
         ('hsl(270, 60%, 50%, .15)', (127, 51, 204, 0.15)),
         ('hsl(270.00deg, 60%, 50%, 15%)', (127, 51, 204, 0.15)),
+        ('hsl(630 60% 70%)', (178, 133, 224)),
+        ('hsl(270 60% 50% / .15)', (127, 51, 204, 0.15)),
+        ('hsla(630, 60%, 70%)', (178, 133, 224)),
+        ('hsla(630 60% 70%)', (178, 133, 224)),
+        ('hsla(270 60% 50% / .15)', (127, 51, 204, 0.15)),
     ],
 )
 def test_color_success(raw_color, as_tuple):
@@ -82,9 +97,17 @@ def test_color_success(raw_color, as_tuple):
         # rgb/rgba strings
         'rgb(0, 0, 1205)',
         'rgb(0, 0, 1128)',
+        'rgb(0, 0, 200 / 0.2)',
+        'rgb(72 122 18, 0.3)',
         'rgba(0, 0, 11205, 0.1)',
         'rgba(0, 0, 128, 11.5)',
+        'rgba(0, 0, 128 / 11.5)',
+        'rgba(72 122 18 0.3)',
+        # hsl/hsla strings
         'hsl(180, 101%, 50%)',
+        'hsl(72 122 18 / 0.3)',
+        'hsl(630 60% 70%, 0.3)',
+        'hsla(72 122 18 / 0.3)',
         # neither a tuple, not a string
         datetime(2017, 10, 5, 19, 47, 7),
         object,
@@ -105,8 +128,8 @@ def test_model_validation():
     assert Model(color=Color('red')).color.as_hex() == '#f00'
     with pytest.raises(ValidationError) as exc_info:
         Model(color='snot')
-    # insert_assert(exc_info.value.errors())
-    assert exc_info.value.errors() == [
+    # insert_assert(exc_info.value.errors(include_url=False))
+    assert exc_info.value.errors(include_url=False) == [
         {
             'type': 'color_error',
             'loc': ('color',),
